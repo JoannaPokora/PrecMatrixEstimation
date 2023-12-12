@@ -1,2 +1,2 @@
-# licencjat
-Materiały do licencjatu
+# Materiały do licencjatu
+Repozytorium przechowuje materiały do pracy licencjackiej.
