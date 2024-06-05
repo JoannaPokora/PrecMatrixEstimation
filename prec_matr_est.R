@@ -1,6 +1,7 @@
 set.seed(12)
 
 library(glasso)
+library(CVglasso)
 library(ggplot2)
 library(MASS)
 library(pracma)
@@ -70,6 +71,101 @@ estimate_precision_matrix <- function(dat, penalty, treshold = 1e-4){
   
   prec.matr
 }
+
+# Compare glasso implementation with glasso function from package
+# Example from article
+rep.times <- 100
+lambda.vals <- c(1, 2, 5)
+
+s <- c(10,1,5,4,10,2,6,10,3,10)
+S <- matrix(0, ncol = 4, nrow = 4)
+S[row(S)>=col(S)] <- s
+S <- S+t(S)
+diag(S) <- 10
+Omega <- solve(S)
+
+rep.dat <- lapply(1:rep.times,
+                  function(i) mvrnorm(10, mu = rep(0,4), Sigma = S))
+
+results <- lapply(lambda.vals, function(lambda){
+  lapply(rep.dat, function(dat){
+    est.prec.matr.start <- Sys.time()
+    est.prec.matr <- estimate_precision_matrix(dat, lambda)
+    est.prec.matr.time <- Sys.time() - est.prec.matr.start
+           
+    glasso.start <- Sys.time()
+    est.cov.matr <- estimate_covariance_matrix(dat)
+    glasso.matr <- glasso(est.cov.matr, lambda)
+    glasso.time <- Sys.time() - glasso.start
+           
+    list(est.prec.matr = list(matr = est.prec.matr,
+                              time = est.prec.matr.time),
+         glasso.matr = list(matr = glasso.matr[["wi"]],
+                            time = glasso.time))
+  })
+})
+
+MSE <- lapply(results, function(lambda){
+  lapply(lambda, function(i){
+    lapply(i, function(res){
+      list(mean((res[["matr"]]-Omega)^2))
+    })
+  })
+})
+
+MSE.df <- data.frame(MSE = unlist(MSE),
+                     Lambda = rep(lambda.vals, each = rep.times*2),
+                     Method = c("est.prec.matr", "glasso")) %>%
+  group_by(Lambda, Method) %>%
+  summarise(MSE = mean(MSE))
+
+ggplot(MSE.df, aes(x = Lambda, y = MSE, color = Method)) +
+  geom_point() +
+  geom_line()
+
+times <- lapply(results, function(lambda){
+  lapply(lambda, function(i){
+    lapply(i, function(res){
+      res[["time"]]
+    })
+  })
+})
+
+times.df <- data.frame(Time = unlist(times),
+                       Lambda = rep(lambda.vals, each = rep.times*2),
+                       Method = c("est.prec.matr", "glasso")) %>%
+  group_by(Lambda, Method) %>%
+  summarise(Time = mean(Time))
+
+ggplot(times.df, aes(x = Lambda, y = Time, color = Method)) +
+  geom_point() +
+  geom_path()
+
+false.disc <- lapply(results, function(lambda){
+  lapply(lambda, function(i){
+    lapply(i, function(res){
+      sum(res[["matr"]][which(Omega == 0)] != 0)
+    })
+  })
+})
+
+true.disc.prop <- lapply(results, function(lambda){
+  lapply(lambda, function(i){
+    lapply(i, function(res){
+      sum(res[["matr"]][which(Omega != 0)] != 0)/sum(Omega != 0)
+    })
+  })
+})
+
+true.disc.prop.df <- data.frame(TD.prop = unlist(true.disc.prop),
+                                Lambda = rep(lambda.vals, each = rep.times*2),
+                                Method = c("est.prec.matr", "glasso")) %>%
+  group_by(Lambda, Method) %>%
+  summarise(TD.prop = mean(TD.prop))
+
+ggplot(true.disc.prop.df, aes(x = Lambda, y = TD.prop, color = Method)) +
+  geom_point() +
+  geom_line()
 
 # penalty <- c(1, 2, 5, 8, 10)
 # treshold <- 1e-4
@@ -186,102 +282,129 @@ estimate_precision_matrix <- function(dat, penalty, treshold = 1e-4){
 #   geom_path() +
 #   facet_grid(Case ~ Variables.num)
 
-# Lambda
-
 rep.times <- 10
 lambda.vals <- c(1, 2, 5)
 var.nums <- c(5, 30, 50, 100)
 obs.num <- 50
 
-cov.matrs <- lapply(var.nums, function(var.num){
+diag.prec.matrs <- lapply(var.nums, function(k){
+  diag(runif(k, 1, 5))
+})
+
+sparse.prec.matrs <- lapply(var.nums, function(var.num){
+  diag.matr <- diag(runif(var.num, 1, 2))
+  rot.matr <- diag(1, nrow = var.num)
+  rot.matr[4,2] <- cospi(1/6)
+  rot.matr[5,4] <- sinpi(1/6)
+  rot.matr[2,4] <- -sinpi(1/6)
+  rot.matr[4,5] <- cospi(1/6)
+  rot.matr %*% diag.matr %*% solve(rot.matr)
+})
+
+rand.prec.matrs <- lapply(var.nums, function(var.num){
   rand.matr <- diag(runif(var.num, 5, 10))
   rand.matr[lower.tri(rand.matr)] <- runif((var.num^2-var.num)/2, 1, 10)
   rand.matr %*% t(rand.matr)
 })
 
+all.prec.matrs <- list(diag.prec.matrs, sparse.prec.matrs, rand.prec.matrs)
+
 rep.dat <- lapply(1:rep.times, function(i){
-  lapply(cov.matrs, function(cov.matr){
-    mvrnorm(obs.num, rep(0, nrow(cov.matr)), cov.matr)
+  lapply(all.prec.matrs, function(prec.matrs){
+           lapply(prec.matrs, function(prec.matr){
+              mvrnorm(obs.num, rep(0, nrow(prec.matr)), solve(prec.matr))
+    })
   })
 })
 
 res <- lapply(rep.dat, function(i){
-  lapply(i, function(dat){
-    lapply(lambda.vals, function(lambda){
-      # est.prec.matr.start <- Sys.time()
-      # est.prec.matr <- estimate_precision_matrix(dat, lambda)
-      # est.prec.matr.time <- Sys.time() - est.prec.matr.start
-      #            
+  lapply(i, function(case){
+    lapply(case, function(dat){
       glasso.start <- Sys.time()
-      est.cov.matr <- estimate_covariance_matrix(dat)
-      glasso.matr <- glasso(est.cov.matr, lambda)
+      glasso.matr <- CVglasso(X = dat)
       glasso.time <- Sys.time() - glasso.start
-               
-      list(glasso.matr = list(prec.matr = glasso.matr[["wi"]],
-                              time = glasso.time))
-      # est.prec.matr = list(prec.matr = est.prec.matr,
-      #                      time = est.prec.matr.time),
-    })
-  })
-})
-
-false.disc <- lapply(res, function(i){
-     mapply(function(res.val.num, cov.matr){
-       lapply(res.val.num, function(res.lambda){
-         lapply(res.lambda, function(res){
-           sum(res[[1]][which(solve(cov.matr) == 0)] != 0)
-         })
-       })
-     }, i, cov.matrs, SIMPLIFY = FALSE)
-   })
-
-true.disc.prop <- lapply(res, function(i){
-  mapply(function(res.var.num, cov.matr){
-    lapply(res.var.num, function(res.lambda){
-      lapply(res.lambda, function(res){
-        prec.matr <- solve(cov.matr)
-        sum(res[[1]][which(prec.matr != 0)] != 0)/ sum(prec.matr != 0)
-      })
-    })
-  }, i, cov.matrs, SIMPLIFY = FALSE)
-})
-
-true.disc.prop.df <- data.frame(TD.prop = unlist(true.disc.prop),
-                                Var.num = rep(var.nums, each = rep.times),
-                                Lambda =
-                                  rep(lambda.vals,
-                                      each = rep.times*length(var.nums))) %>%
-  group_by(Var.num, Lambda) %>%
-  summarise(TD.prop = mean(TD.prop))
-
-ggplot(true.disc.prop.df, aes(x = Var.num, y = TD.prop,
-                              color = as.factor(Lambda))) +
-  geom_point() +
-  geom_line()
-
-shrink.res <- lapply(rep.dat, function(i){
-  lapply(i, function(dat){
+      
       shrink.start <- Sys.time()
       shrink.matr <- linearShrinkLWEst(dat)
       shrink.time <- Sys.time() - shrink.start
-      
-      list(prec.matr = solve(shrink.matr),
-           time = shrink.time)
+        
+      list(glasso.matr = list(prec.matr = glasso.matr[["Omega"]],
+                              time = glasso.time),
+           shrink.matr = list(prec.matr = solve(shrink.matr),
+                              time = shrink.time))
+    })
   })
 })
 
-shrink.true.disc.prop <- lapply(shrink.res, function(i){
-  mapply(function(res, cov.matr){
-    prec.matr <- solve(cov.matr)
-    sum(res[[1]][which(prec.matr != 0)] != 0)/ sum(prec.matr != 0)
-  }, i, cov.matrs, SIMPLIFY = FALSE)
+false.disc.prop <- lapply(res, function(i){
+     mapply(function(case, prec.matrs){
+       mapply(function(alg, prec.matr){
+         lapply(alg, function(res){
+           sum(res[[1]][which(prec.matr == 0)] != 0)/sum(res[[1]] != 0)
+         })
+       }, case, prec.matrs, SIMPLIFY = FALSE)
+     }, i, all.prec.matrs, SIMPLIFY = FALSE)
+   })
+
+false.disc.prop.df <- data.frame(FD.prop = unlist(false.disc.prop),
+                                 Algorithm = c("glasso", "shrinkage"),
+                                 Var.num = rep(var.nums, each = 2),
+                                 Case = rep(c("diagonal", "sparse", "random"),
+                                           each = length(var.nums)*2)) %>%
+  group_by(Algorithm, Var.num, Case) %>%
+  summarise(FD.prop = mean(FD.prop))
+
+ggplot(false.disc.prop.df, aes(x = Var.num, y = FD.prop,
+                              color = Algorithm)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ Case)
+
+true.disc.prop <- lapply(res, function(i){
+  mapply(function(case, prec.matrs){
+    mapply(function(alg, prec.matr){
+      lapply(alg, function(res){
+        sum(res[[1]][which(prec.matr != 0)] != 0)/ sum(res[[1]] != 0)
+      })
+    }, case, prec.matrs, SIMPLIFY = FALSE)
+  }, i, all.prec.matrs, SIMPLIFY = FALSE)
 })
 
-shrink.true.disc.prop.df <- data.frame(TD.prop = unlist(shrink.true.disc.prop),
-                                Var.num = rep(var.nums, each = rep.times)) %>%
-  group_by(Var.num) %>%
+true.disc.prop.df <- data.frame(TD.prop = unlist(true.disc.prop),
+                                 Algorithm = c("glasso", "shrinkage"),
+                                 Var.num = rep(var.nums, each = 2),
+                                 Case = rep(c("diagonal", "sparse", "random"),
+                                            each = length(var.nums)*2)) %>%
+  group_by(Algorithm, Var.num, Case) %>%
   summarise(TD.prop = mean(TD.prop))
 
-ggplot(shrink.true.disc.prop.df, aes(x = Var.num, y = TD.prop)) +
+ggplot(true.disc.prop.df, aes(x = Var.num, y = TD.prop,
+                               color = Algorithm)) +
   geom_point() +
-  geom_line()
+  geom_line() +
+  facet_wrap(~ Case)
+
+mse <- lapply(res, function(i){
+  mapply(function(case, prec.matrs){
+    mapply(function(alg, prec.matr){
+      lapply(alg, function(res){
+        mean((res[[1]]-prec.matr)^2)
+      })
+    }, case, prec.matrs, SIMPLIFY = FALSE)
+  }, i, all.prec.matrs, SIMPLIFY = FALSE)
+})
+
+mse.df <- data.frame(MSE = unlist(mse),
+                                Algorithm = c("glasso", "shrinkage"),
+                                Var.num = rep(var.nums, each = 2),
+                                Case = rep(c("diagonal", "sparse", "random"),
+                                           each = length(var.nums)*2)) %>%
+  group_by(Algorithm, Var.num, Case) %>%
+  summarise(MSE = mean(MSE))
+
+ggplot(mse.df, aes(x = Var.num, y = MSE,
+                              color = Algorithm)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ Case, scales = "free_y", dir = "v")
+
