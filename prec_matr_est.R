@@ -3,10 +3,11 @@ set.seed(12)
 library(CVglasso)
 library(ggplot2)
 library(MASS)
-library(pracma)
 library(cvCovEst)
 library(dplyr)
 library(mvtnorm)
+library(Matrix)
+library(matrixcalc)
 
 estimate_covariance_matrix <- function(dat){
   sample.mean <- apply(dat, 2, mean)
@@ -78,68 +79,30 @@ cases <- expand.grid(Methood = c("glasso", "CVglasso", "shrinkage"),
                      rep = 1:10,
                      obs.num = c(100, 500),
                      var.num = c(100, 200),
+                     cor.lvl = c("low", "high"),
                      cor.var.num = c(5, 50, "all"),
-                     rot = c(1/9, 1/4),
                      stringsAsFactors = FALSE) %>%
-  mutate(cor.var.num = ifelse(cor.var.num == "all", var.num,
+  mutate(cor.var.num = ifelse(cor.var.num == "all", as.numeric(var.num),
                               as.numeric(cor.var.num)))
 
-prec.matrs <- apply(unique(cases[,5:7]), 1, function(case){
-  var.num <- case["var.num"]
-  cor.var.num <- case["cor.var.num"]
-  rot <- case["rot"]
+prec.matrs <- apply(unique(cases[,4:7]), 1, function(case){
+  var.num <- as.numeric(case["var.num"])
+  cor.var.num <- as.numeric(case["cor.var.num"])
+  if(case["cor.lvl"] == "low") cor.lvl <- c(0.3, 0.5)
+  else cor.lvl <- c(0.7, 0.9)
   
-  rot.matr <- diag(1, nrow = var.num)
-  
-  coord <- sample(1:var.num, cor.var.num)
-  
-  for(i in 1:(cor.var.num/2)){
-    diag(rot.matr)[c(coord[2*i-1], coord[2*i])] <- cospi(rot)
-    rot.matr[coord[2*i-1], coord[2*i]] <- -sinpi(rot)
-    rot.matr[coord[2*i], coord[2*i-1]] <- sinpi(rot)
-  }
-  rot.matr %*% diag(runif(var.num, 1, 2)) %*% solve(rot.matr)
-})
+  coord.choose <- diag(0, nrow = var.num)
+  coord.choose[upper.tri(coord.choose)][sample(1:((var.num^2-var.num)/2),
+                                               cor.var.num)] <- 1
+  coord <- which(coord.choose == 1, arr.ind = TRUE)
 
-# prec.matrs <- apply(unique(cases[,5:7]), 1, function(case){
-#   var.num <- case["var.num"]
-#   cor.var.num <- case["cor.var.num"]
-#   rot <- case["rot"]
-#   rot.matr <- diag(1, nrow = var.num)
-#   
-#   cor.vars <- data.frame(x = 0, y = 0)
-#   
-#   cur.cor.var.num <- 0
-#   while(cur.cor.var.num < cor.var.num){
-#     new.rot.matr <- diag(1, nrow = var.num)
-#     coord <- sample(1:var.num, 2)
-#     while((any(apply(cor.vars, 1, function(r) all(r == sort(coord))))) | 
-#           (cur.cor.var.num + 1 +
-#           sum(apply(cor.vars, 1, function(r) any(coord %in% r)))) >
-#           cor.var.num){
-#       coord <- sample(1:var.num, 2)
-#     }
-#     coord.to.add <- lapply(coord, function(co){
-#       apply(cor.vars, 1, function(r){
-#         if(co %in% r){
-#           sort(c(coord[which(coord != co)], r[which(r != co)]))
-#         }else c(0, 0)
-#       })
-#     })
-#     coord.to.add <- as.data.frame(t(cbind(coord.to.add[[1]],
-#                                           coord.to.add[[2]]))) %>%
-#       filter(.[[1]] != 0)
-#     colnames(coord.to.add) <- c("x", "y")
-#     cor.vars <- rbind(cor.vars, sort(coord), coord.to.add)
-#     cur.cor.var.num <- cur.cor.var.num +
-#       sum(apply(cor.vars, 1, function(r) any(coord %in% r)))
-#     diag(rot.matr)[c(coord[1], coord[2])] <- cospi(rot)
-#     new.rot.matr[coord[1], coord[2]] <- -sinpi(rot)
-#     new.rot.matr[coord[2], coord[1]] <- sinpi(rot)
-#     rot.matr <- rot.matr %*% new.rot.matr
-#   }
-#   rot.matr %*% diag(runif(var.num, 1, 2)) %*% solve(rot.matr)
-# })
+  prec.matr <- as.matrix(sparseMatrix(coord[,1], coord[,2],
+                         x = runif(cor.var.num, cor.lvl[1], cor.lvl[2]),
+                         dims = c(var.num, var.num),
+                         symmetric = TRUE))
+  diag(prec.matr) <- var.num
+  prec.matr
+})
 
 cases <- cbind(cases, Times = 1:nrow(cases),
                MSE = 1:nrow(cases), DifSup = 1:nrow(cases))
@@ -183,24 +146,26 @@ for(case in 1:length(dats)){
 }
 
 results <- cases %>%
-  group_by(Methood, Distribution, obs.num, var.num, cor.var.num, rot) %>%
+  group_by(Methood, Distribution, obs.num, var.num, cor.var.num, cor.lvl) %>%
   summarise(Mean.time = mean(Times),
             Mean.MSE = mean(MSE),
             Mean.dif.sup = mean(DifSup)) %>%
-  ungroup() %>%
-  mutate(rot = ifelse(rot == 0.25, "45°", "20°"))
+  ungroup()
 
 ggplot(results, aes(x = cor.var.num, y = Mean.time, color = Distribution)) +
   geom_point() +
   geom_line() +
-  facet_grid(obs.num + var.num ~ Methood + rot)
+  facet_grid(obs.num + var.num ~ Methood + cor.lvl)
 
 ggplot(results, aes(x = cor.var.num, y = Mean.MSE, color = Distribution)) +
   geom_point() +
   geom_line() +
-  facet_grid(obs.num + var.num ~ Methood + rot)
+  facet_grid(obs.num + var.num ~ Methood + cor.lvl)
 
 ggplot(results, aes(x = cor.var.num, y = Mean.dif.sup, color = Distribution)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(obs.num + var.num ~ Methood + cor.lvl)if.sup, color = Distribution)) +
   geom_point() +
   geom_line() +
   facet_grid(obs.num + var.num ~ Methood + rot)
