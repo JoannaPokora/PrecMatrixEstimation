@@ -8,7 +8,7 @@ library(dplyr)
 library(mvtnorm)
 library(Matrix)
 library(matrixcalc)
-library(hrbrthemes)
+library(ggpubr)
 
 estimate_covariance_matrix <- function(dat){
   sample.mean <- apply(dat, 2, mean)
@@ -44,7 +44,7 @@ glasso <- function(dat, penalty, treshold = 1e-4){
       crop.inv.prec.matr <- inv.prec.matr[-i,-i]
       
       iter.beta <- 0
-      while((any(abs(crop.beta.hat-beta.hat[["old"]][-i]) > treshold) |
+      while((any(abs(crop.beta.hat-beta.hat[["old"]][-i]) > 0.01) |
             iter.beta == 0) & iter.beta < 100){
         iter.beta <- iter.beta + 1
         beta.hat[["old"]][-i] <- crop.beta.hat
@@ -75,22 +75,21 @@ glasso <- function(dat, penalty, treshold = 1e-4){
 }
 
 # Ostateczne symulacje
+rep.times <- 10
+
 results <- expand.grid(Method = c("glasso", "CVglasso", "shrinkage"),
-                     Distribution = c("normal", "t-distribution"),
-                     rep = 1:10,
+                     Distribution = c("normal distribution", "t-distribution"),
+                     rep = 1:rep.times,
                      obs.num = c(100, 500),
                      var.num = c(100, 200),
-                     cov.val = c("0.3-0.5", "0.7-0.9"),
-                     cor.var.num = c(5, 50, "all"),
-                     stringsAsFactors = FALSE) %>%
-  mutate(cor.var.num = ifelse(cor.var.num == "all", as.numeric(var.num),
-                              as.numeric(cor.var.num)))
+                     cor.var.num = c("5", "50", "all"),
+                     stringsAsFactors = FALSE)
 
-prec.matrs <- apply(unique(results[,4:7]), 1, function(result){
+prec.matrs <- apply(unique(results[,4:6]), 1, function(result){
   var.num <- as.numeric(result["var.num"])
-  cor.var.num <- as.numeric(result["cor.var.num"])
-  if(result["cov.val"] == "0.3-0.5") cov.val <- c(0.3, 0.5)
-  else cov.val <- c(0.7, 0.9)
+  
+  if(result["cor.var.num"] == "all") cor.var.num <- (var.num^2-var.num)/2
+  else cor.var.num <- as.numeric(result["cor.var.num"])
   
   coord.choose <- diag(0, nrow = var.num)
   coord.choose[upper.tri(coord.choose)][sample(1:((var.num^2-var.num)/2),
@@ -98,7 +97,7 @@ prec.matrs <- apply(unique(results[,4:7]), 1, function(result){
   coord <- which(coord.choose == 1, arr.ind = TRUE)
 
   prec.matr <- as.matrix(sparseMatrix(coord[,1], coord[,2],
-                         x = runif(cor.var.num, cov.val[1], cov.val[2]),
+                         x = rnorm(cor.var.num),
                          dims = c(var.num, var.num),
                          symmetric = TRUE))
   diag(prec.matr) <- var.num
@@ -106,71 +105,154 @@ prec.matrs <- apply(unique(results[,4:7]), 1, function(result){
 })
 
 results <- cbind(results, Times = 1:nrow(results),
-               MSE = 1:nrow(results), DifSup = 1:nrow(results))
+                 sq.frob.norm = 1:nrow(results),
+                 DifSup = 1:nrow(results),
+                 power = 1:nrow(results),
+                 fdp = 1:nrow(results))
 
-results.dat <- unique(results[3:7])
+results.dat <- unique(results[3:6])
 dats <- lapply(1:(nrow(results.dat)), function(result){
-  prec.matr <- prec.matrs[[(result-1)%/%20+1]]
-  list(mvrnorm(results.dat[result, 2], rep(0, nrow(prec.matr)), solve(prec.matr)),
-       rmvt(results.dat[result, 2], solve(prec.matr), df = 10, checkSymmetry = FALSE))
+  prec.matr <- prec.matrs[[(result-1)%/%rep.times+1]]
+  list(mvrnorm(results.dat[result, 2],
+               rep(0, nrow(prec.matr)),
+               solve(prec.matr)),
+       rmvt(results.dat[result, 2],
+            solve(prec.matr), df = 5,
+            checkSymmetry = FALSE))
 })
+
 dats <- unlist(dats, recursive = FALSE)
 
 calc_stat <- function(est.prec.matr, prec.matr){
   dif <- est.prec.matr-prec.matr
-  c(mse = mean((dif)^2), dif.sup = max(abs(dif)))
+  c(matrix.mse = mean((dif%*%t(dif))^2), dif.sup = max(abs(dif)),
+    power = sum(est.prec.matr[which(prec.matr != 0)] != 0)/sum(prec.matr != 0),
+    fdp = sum(est.prec.matr[which(prec.matr == 0)] != 0))/
+          max(sum(est.prec.matr != 0), 1)
 }
 
+est.prec.matrs <- as.list(rep(0, nrow(results)))
+
 for(result in 1:length(dats)){
-   prec.matr <- prec.matrs[[(result-1)%/%40+1]]
+  print(result)
+  prec.matr <- prec.matrs[[(result-1)%/%(2*rep.times)+1]]
 
-  CVglasso.start <- Sys.time()
-  CVglasso.res <- CVglasso(X = dats[[result]])
-  results[result*3-1, 8] <- Sys.time() - CVglasso.start
+  est.prec.matrs[[result*3-1]] <- CVglasso(X = dats[[result]])
+  results[result*3-1, 7] <- est.prec.matrs[[result*3-1]][["Time"]]
 
-  CVglasso.matr <- CVglasso.res[["Omega"]]
-  CVglasso.lambda <- CVglasso.res[["Tuning"]][2]
+  CVglasso.matr <- est.prec.matrs[[result*3-1]][["Omega"]]
+  CVglasso.lambda <- est.prec.matrs[[result*3-1]][["Tuning"]][2]
 
-  results[result*3-1, 9:10] <- calc_stat(CVglasso.matr, prec.matr)
+  results[result*3-1, 8:11] <- calc_stat(CVglasso.matr, prec.matr)
 
-  glasso.start <- Sys.time()
-  glasso.matr <- glasso(dats[[result]], CVglasso.lambda)
-  results[result*3-2, 8] <- Sys.time() - glasso.start
-
-  results[result*3-2, 9:10] <- calc_stat(glasso.matr, prec.matr)
+  glasso.res <- tryCatch({
+    glasso.start <- Sys.time()
+    glasso.res <- glasso(dats[[result]], CVglasso.lambda)
+    glasso.time <- Sys.time() - glasso.start
+    list(glasso.res, glasso.time)
+  }, error = function(e){
+    print("error")
+    NaN
+  })
+  
+  if(any(is.na(glasso.res))){
+    results[result*3-2, 7:11] <- NaN
+    est.prec.matrs[[result*3-2]] <- NaN
+  }else{
+    results[result*3-2, 7] <- glasso.res[[2]]
+    est.prec.matrs[[result*3-2]] <- glasso.res[[1]]
+    results[result*3-2, 8:11] <- calc_stat(est.prec.matrs[[result*3-2]],
+                                          prec.matr)
+  }
   
   shrink.start <- Sys.time()
-  shrink.matr <- solve(linearShrinkLWEst(dats[[result]]))
-  results[result*3, 8] <- Sys.time() - shrink.start
+  est.prec.matrs[[result*3]] <- solve(linearShrinkLWEst(dats[[result]]))
+  results[result*3, 7] <- Sys.time() - shrink.start
   
-  results[result*3, 9:10] <- calc_stat(shrink.matr, prec.matr)
+  results[result*3, 8:11] <- calc_stat(est.prec.matrs[[result*3]], prec.matr)
 }
 
 results <- results %>%
   mutate(obs.num = paste0(obs.num, " observations"),
          var.num = paste0(var.num, " variables"))
 
-plots_theme <- function(){
-  theme
-}
+results <- results %>%
+  filter(!(is.na(Times)))
 
 results %>%
-  group_by(Method, Distribution, obs.num, var.num, cor.var.num, cov.val) %>%
+  group_by(Method, Distribution, obs.num, var.num, cor.var.num) %>%
   summarise(Mean.time = mean(Times)) %>%
   ggplot(aes(x = cor.var.num, y = Mean.time, color = Method)) +
   geom_point() +
-  geom_line() +
-  labs(x = "Number of conditional dependent variables",
+  geom_line(aes(group = Method)) +
+  labs(x = "Number of nonzero elements in a precision matrix",
        y = "Mean time") +
-  scale_color_manual(values = ) +
-  facet_grid(cov.val + Distribution ~ var.num + obs.num, scales = "free") +
+  scale_color_manual(values = c("CVglasso" = "#FFB909",
+                                "glasso" = "#30CB14",
+                                "shrinkage" = "#0b2206")) +
+  facet_wrap(Distribution ~ var.num + obs.num, scales = "free_y", nrow = 2) +
   theme_light()
 
-ggplot(results, aes(x = cor.var.num, y = MSE, color = Distribution)) +
-  geom_boxplot() +
-  facet_grid(obs.num + var.num ~ Method + cov.val)
-
-ggplot(results, aes(x = cor.var.num, y = Mean.dif.sup, color = Distribution)) +
+results %>%
+  group_by(Method, Distribution, obs.num, var.num, cor.var.num) %>%
+  summarise(MSE = mean(sq.frob.norm)) %>%
+  ggplot(aes(x = cor.var.num, y = MSE, color = Method, fill = Method)) +
   geom_point() +
-  geom_line() +
-  facet_grid(obs.num + var.num ~ Methood + cov.val)
+  geom_line(aes(group = Method)) +
+  labs(x = "Number of nonzero elements in a precision matrix",
+       y = "Mean squared error") +
+  scale_color_manual(values = c("CVglasso" = "#FFB909",
+                                "glasso" = "#30CB14",
+                                "shrinkage" = "#0b2206")) +
+  scale_fill_manual(values = c("CVglasso" = "#FFEAB5",
+                               "glasso" = "#BDFCB1",
+                               "shrinkage" = "#6A8663")) +
+  facet_wrap(Distribution ~ var.num + obs.num, scales = "free_y", nrow = 2) +
+  theme_light()
+
+ggplot(results, aes(x = cor.var.num, y = DifSup, color = Method, fill = Method)) +
+  geom_boxplot() +
+  labs(x = "Number of nonzero elements in a precision matrix",
+       y = "Maximum difference") + 
+  scale_color_manual(values = c("CVglasso" = "#FFB909",
+                                "glasso" = "#30CB14",
+                                "shrinkage" = "#0b2206")) +
+  scale_fill_manual(values = c("CVglasso" = "#FFEAB5",
+                               "glasso" = "#BDFCB1",
+                               "shrinkage" = "#6A8663")) +
+  facet_wrap(Distribution ~ var.num + obs.num, scales = "free_y", nrow = 2) +
+  theme_light()
+
+results %>%
+  group_by(Method, Distribution, obs.num, var.num, cor.var.num) %>%
+  summarise(Mean.power = mean(power)) %>%
+  ggplot(aes(x = cor.var.num, y = Mean.power, color = Method, fill = Method)) +
+  geom_point() +
+  geom_line(aes(group = Method)) +
+  labs(x = "Number of nonzero elements in a precision matrix",
+       y = "Mean power") +
+  scale_color_manual(values = c("CVglasso" = "#FFB909",
+                                "glasso" = "#30CB14",
+                                "shrinkage" = "#0b2206")) +
+  scale_fill_manual(values = c("CVglasso" = "#FFEAB5",
+                               "glasso" = "#BDFCB1",
+                               "shrinkage" = "#6A8663")) +
+  facet_wrap(Distribution ~ var.num + obs.num, nrow = 2) +
+  theme_light()
+
+results %>%
+  group_by(Method, Distribution, obs.num, var.num, cor.var.num) %>%
+  summarise(FDR = mean(fdp)) %>%
+  ggplot(aes(x = cor.var.num, y = FDR, color = Method, fill = Method)) +
+  geom_point() +
+  geom_line(aes(group = Method)) +
+  labs(x = "Number of nonzero elements in a precision matrix",
+       y = "False discovery rate") +
+  scale_color_manual(values = c("CVglasso" = "#FFB909",
+                                "glasso" = "#30CB14",
+                                "shrinkage" = "#0b2206")) +
+  scale_fill_manual(values = c("CVglasso" = "#FFEAB5",
+                               "glasso" = "#BDFCB1",
+                               "shrinkage" = "#6A8663")) +
+  facet_wrap(Distribution ~ var.num + obs.num, nrow = 2) +
+  theme_light()
